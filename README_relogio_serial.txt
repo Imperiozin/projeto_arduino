@@ -32,7 +32,10 @@ Instale na IDE:
 - Adafruit Unified Sensor
 
 BIBLIOTECAS DO PYTHON
-pip install pyserial requests
+pip install -r requirements.txt
+
+# ou manualmente:
+pip install pyserial requests matplotlib
 
 COMO USAR NO ARDUINO
 1) Monte o circuito conforme a pinagem acima.
@@ -82,9 +85,28 @@ Arduino -> Python
 - ACK,ALARM,n
 - ALARM,n
 - NOW,YYYY,MM,DD,HH,MM,SS
+- SENSOR,temp,humidity
 
-IDEIAS DE MELHORIA
-- Persistir também a tela favorita
-- Adicionar snooze
+Python -> Arduino
+- TIME,YYYY,MM,DD,HH,MM,SS
+- WX,temp,precip,aqi
+- PING
+- STATUS
+
+NOVAS FUNCIONALIDADES
+- O Arduino coleta dados de temperatura e umidade do DHT11 a cada 30 minutos (configurável) e envia para o Python.
+- O Python armazena os dados das últimas 24 horas.
+- Quando um alarme dispara, o Python pode enviar um email com tabela dos dados e gráfico (se configurado).
+- Argumentos adicionais no Python:
+  --sensor-interval: intervalo em minutos para coleta (padrão 30)
+  --simulate-sensor-data: simular dados de sensor das últimas 24 horas para teste (padrão False)
+  --email-enabled: habilitar envio de email
+  --email-smtp, --email-port, --email-user, --email-pass, --email-to: configuração do email
+
+EXEMPLO DE USO COM EMAIL
+python weather_bridge.py --email-enabled --email-smtp smtp.gmail.com --email-user seuemail@gmail.com --email-pass suasenha --email-to destinatario@email.com
+
+EXEMPLO DE USO COM SIMULAÇÃO DE DADOS
+python weather_bridge.py --simulate-sensor-data --email-enabled --email-smtp smtp.gmail.com --email-user seuemail@gmail.com --email-pass suasenha --email-to destinatario@email.com
 - Trocar o LCD por I2C para reduzir fios
 - Adicionar ícones customizados no LCD

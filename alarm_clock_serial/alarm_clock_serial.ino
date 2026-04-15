@@ -28,6 +28,7 @@ const unsigned long LONG_PRESS_MS = 700;
 const unsigned long DEBOUNCE_MS = 25;
 const unsigned long DISPLAY_REFRESH_MS = 200;
 const unsigned long DHT_READ_MS = 2500;
+const unsigned long SENSOR_SEND_INTERVAL_MS = 30UL * 60UL * 1000UL; // 30 minutos
 const unsigned long EEPROM_SAVE_GAP_MS = 200;
 
 #define DHTTYPE DHT11
@@ -109,14 +110,73 @@ unsigned long lastDisplayMs = 0;
 unsigned long lastBuzzerToggleMs = 0;
 bool buzzerState = false;
 unsigned long lastConfigSaveMs = 0;
+int8_t snoozeAlarmIndex = -1;
+unsigned long snoozeEndMs = 0;
+const unsigned long SNOOZE_DURATION_MS = 5UL * 1000UL; // 5 minutos
+bool isSnoozeResume = false;  // Flag para indicar se é retomada de snooze
 
 unsigned long lastTriggeredMinuteByAlarm[MAX_ALARMS];
+unsigned long lastSensorSendMs = 0;
 char serialBuffer[96];
 uint8_t serialLen = 0;
 
 // =============================
-// Utilidades
+// Caracteres customizados LCD
 // =============================
+byte charClockIcon[8] = {
+  B00000,
+  B01110,
+  B10101,
+  B10101,
+  B10011,
+  B10001,
+  B01110,
+  B00000
+};
+
+byte charDegree[8] = {
+  B00110,
+  B01001,
+  B01001,
+  B00110,
+  B00000,
+  B00000,
+  B00000,
+  B00000
+};
+
+byte charChevronLeft[8] = {
+  B01110,
+  B11101,
+  B11011,
+  B10111,
+  B10111,
+  B11011,
+  B11101,
+  B01110
+};
+
+byte charChevronRight[8] = {
+  B01110,
+  B10111,
+  B11011,
+  B11101,
+  B11101,
+  B11011,
+  B10111,
+  B01110
+};
+
+byte charCircleEmpty[8] = {
+  B01110,
+  B11111,
+  B11011,
+  B10001,
+  B10001,
+  B11011,
+  B11111,
+  B01110
+};
 uint8_t dayOfWeekToMaskIndex(uint8_t rtcDow) {
   // RTClib: 0=domingo, 1=segunda, ..., 6=sábado
   switch (rtcDow) {
@@ -180,10 +240,16 @@ void stopAlarm() {
   currentScreen = previousHomeScreen;
 }
 
+void snoozeAlarm(uint8_t alarmIndex) {
+  snoozeAlarmIndex = alarmIndex;
+  snoozeEndMs = millis() + SNOOZE_DURATION_MS;
+  stopAlarm();
+}
+
 void startAlarm(uint8_t alarmIndex) {
   alarmRinging = true;
   ringingAlarmIndex = alarmIndex;
-  previousHomeScreen = currentScreen;
+  previousHomeScreen = SCREEN_HOME_CLOCK;  // Sempre retorna para tela de relógio
   currentScreen = SCREEN_ALARM_RINGING;
   lastBuzzerToggleMs = 0;
 }
@@ -274,8 +340,26 @@ void formatClockLine1(const DateTime& now, char* out) {
 void formatNextAlarm(char* out) {
   for (uint8_t i = 0; i < MAX_ALARMS; i++) {
     if (config.alarms[i].enabled) {
-      sprintf(out, "A%d %02d:%02d %s", i + 1, config.alarms[i].hour, config.alarms[i].minute,
-              config.alarms[i].repeatMask ? "REP" : "1x ");
+      char daysStr[8] = {'\0'};
+      
+      if (config.alarms[i].repeatMask == 0) {
+        strcpy(daysStr, "1x ");
+      } else {
+        const char* dayChars = "STQQSSD";
+        for (uint8_t j = 0; j < 7; j++) {
+          if (config.alarms[i].repeatMask & (1 << j)) {
+            uint8_t len = strlen(daysStr);
+            daysStr[len] = dayChars[j];
+            daysStr[len + 1] = '\0';
+          } else {
+              uint8_t len = strlen(daysStr);
+              daysStr[len] = '-';
+              daysStr[len + 1] = '\0';
+          }
+        }
+      }
+      
+      sprintf(out, "A%d %02d:%02d %s", i + 1, config.alarms[i].hour, config.alarms[i].minute, daysStr);
       return;
     }
   }
@@ -304,7 +388,7 @@ void renderWeatherHome() {
     dtostrf(extraData.outsideTemp, 2, 1, tempStr);
     dtostrf(extraData.precipitation, 2, 1, precStr);
 
-    snprintf(l1, sizeof(l1), "T:%sC P:%s", tempStr, precStr);
+    snprintf(l1, sizeof(l1), "T:%s%cC P:%s", tempStr, 1, precStr);
     snprintf(l2, sizeof(l2), "AQI:%3d USB OK", extraData.aqi);
   }
 
@@ -324,7 +408,7 @@ void renderSensorHome() {
     dtostrf(localSensor.temperature, 2, 1, tempStr);
     dtostrf(localSensor.humidity, 2, 1, humStr);
 
-    snprintf(l1, sizeof(l1), "Amb:%s C", tempStr);
+    snprintf(l1, sizeof(l1), "Amb:%s%cC", tempStr, 1);
     snprintf(l2, sizeof(l2), "Umidade:%s %%", humStr);
   }
   lcdPrint2Lines(l1, l2);
@@ -339,7 +423,7 @@ void renderMenu() {
     uint8_t idx = selectedMenuIndex - 1;
     snprintf(l1, sizeof(l1), "Menu: Alarme %d", idx + 1);
   }
-  strcpy(l2, "U/D | OK entra");
+  snprintf(l2, sizeof(l2), "%c/%c - %c EDITAR", 2, 4, 3);
   lcdPrint2Lines(l1, l2);
 }
 
@@ -408,11 +492,11 @@ void renderAlarmRinging() {
   char l2[17];
   if (ringingAlarmIndex >= 0) {
     snprintf(l1, sizeof(l1), "ALARME %d TOCANDO", ringingAlarmIndex + 1);
-    snprintf(l2, sizeof(l2), "%02d:%02d - aperte", config.alarms[ringingAlarmIndex].hour,
+    snprintf(l2, sizeof(l2), "    %c %02d:%02d", 5, config.alarms[ringingAlarmIndex].hour,
              config.alarms[ringingAlarmIndex].minute);
   } else {
     strcpy(l1, "ALARME TOCANDO");
-    strcpy(l2, "Aperte botao");
+    strcpy(l2, "00:00");
   }
   lcdPrint2Lines(l1, l2);
 }
@@ -443,6 +527,18 @@ void readDHTIfNeeded() {
     localSensor.humidity = h;
     localSensor.temperature = t;
     localSensor.valid = true;
+  }
+}
+
+void sendSensorDataIfNeeded() {
+  if (millis() - lastSensorSendMs < SENSOR_SEND_INTERVAL_MS) return;
+  lastSensorSendMs = millis();
+
+  if (localSensor.valid) {
+    Serial.print(F("SENSOR,"));
+    Serial.print(localSensor.temperature, 1);
+    Serial.print(F(","));
+    Serial.println(localSensor.humidity, 1);
   }
 }
 
@@ -627,7 +723,21 @@ void handleAlarmEditor() {
 }
 
 void handleAlarmRinging() {
-  if (consumeShort(btnUp) || consumeShort(btnDown) || consumeShort(btnOk) || consumeLong(btnOk)) {
+  if (consumeShort(btnOk)) {
+    if (ringingAlarmIndex >= 0) {
+      snoozeAlarm(ringingAlarmIndex);
+    } else {
+      stopAlarm();
+    }
+  }
+  
+  if (consumeLong(btnOk)) {
+    if (ringingAlarmIndex >= 0) {
+      if (config.alarms[ringingAlarmIndex].repeatMask == 0) {
+        config.alarms[ringingAlarmIndex].enabled = 0;
+        saveConfig();
+      }
+    }
     stopAlarm();
   }
 }
@@ -635,13 +745,33 @@ void handleAlarmRinging() {
 void checkAlarms() {
   if (alarmRinging) return;
 
+  // Verificar se snooze expirou
+  if (snoozeAlarmIndex >= 0 && millis() >= snoozeEndMs) {
+    // Resetar o lastTriggeredMinute para permitir que o alarme dispare novamente
+    lastTriggeredMinuteByAlarm[snoozeAlarmIndex] = 0;
+    isSnoozeResume = true;  // Marcar como retomada de snooze
+    snoozeAlarmIndex = -1;
+  }
+
   DateTime now = rtc.now();
   for (uint8_t i = 0; i < MAX_ALARMS; i++) {
+    // Se o alarme está em snooze, pular
+    if (i == snoozeAlarmIndex) continue;
+    
     if (isAlarmDue(config.alarms[i], now, i)) {
+      // Se houver outro alarme em snooze, cancelá-lo
+      snoozeAlarmIndex = -1;
+      
       markAlarmTriggered(i, now);
       startAlarm(i);
-      Serial.print(F("ALARM,"));
-      Serial.println(i + 1);
+      
+      // Só enviar ALARM se não for retomada de snooze
+      if (!isSnoozeResume) {
+        Serial.print(F("ALARM,"));
+        Serial.println(i + 1);
+      }
+      isSnoozeResume = false;  // Resetar flag após usar
+      
       break;
     }
   }
@@ -715,6 +845,13 @@ void setup() {
   pinMode(BTN_OK_PIN, INPUT_PULLUP);
 
   lcd.begin(16, 2);
+  
+  lcd.createChar(1, charDegree);
+  lcd.createChar(2, charChevronLeft);
+  lcd.createChar(3, charCircleEmpty);
+  lcd.createChar(4, charChevronRight);
+  lcd.createChar(5, charClockIcon);
+  
   Wire.begin();
   dht.begin();
   Serial.begin(9600);
@@ -745,6 +882,7 @@ void loop() {
 
   readSerialCommands();
   readDHTIfNeeded();
+  sendSensorDataIfNeeded();
   checkAlarms();
   processAlarmBuzzer();
 
